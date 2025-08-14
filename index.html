@@ -220,7 +220,6 @@
           });
           if (!gl) throw new Error("WebGL not available");
 
-          // ▼ add this line
           gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
           // Shaders
@@ -283,16 +282,12 @@
       }
 
       void main(){
-        // add this line: uv with top-left origin to match screen/pointer coords
-        vec2 uvScreen = vec2(vUv.x, 1.0 - vUv.y);
-
-        // keep sampling the video/blurred with vUv (now that upload is flipped, this is correct)
         vec2 videoUV = mapToVideo(vUv);
         vec4 baseCol = texture2D(uVideo, videoUV);
         vec4 blurCol = texture2D(uBlurred, vUv);
 
-        // but compute ring/mask in screen coords so taps line up
-        vec2 fragPx = uvScreen * uCanvasSize;
+        // radial mask: 0 inside inner, 1 beyond outer, linear in between
+        vec2 fragPx = vUv * uCanvasSize;
         float d = distance(fragPx, uCenterPx);
         float t = clamp((d - uInnerRadius) / max(uOuterRadius - uInnerRadius, 1e-4), 0.0, 1.0);
         vec4 color = mix(baseCol, blurCol, t);
