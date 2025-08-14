@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>iPad Camera Blur-Edges (WebGL)</title>
+    <style>
+      :root {
+        --ui-padding: 12px;
+        --ui-radius: 14px;
+        --ui-bg: rgba(20, 20, 22, 0.55);
+        --ui-fg: #fff;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #000;
+        color: var(--ui-fg);
+        font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica,
+          Arial, sans-serif;
+      }
+      .app {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+      }
+      canvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+        touch-action: none;
+      }
+      video {
+        position: absolute;
+        inset: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+      }
+      .hud {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: env(safe-area-inset-bottom);
+        padding: calc(var(--ui-padding) + env(safe-area-inset-bottom))
+          var(--ui-padding) var(--ui-padding);
+        display: grid;
+        gap: 10px;
+        pointer-events: none;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 10px;
+        pointer-events: auto;
+      }
+      .panel {
+        background: var(--ui-bg);
+        backdrop-filter: blur(10px);
+        border-radius: var(--ui-radius);
+        padding: 10px 12px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+      }
+      .range {
+        width: 100%;
+      }
+      .btn {
+        pointer-events: auto;
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+      }
+      .btn > button {
+        font-size: 17px;
+        padding: 14px 18px;
+        border-radius: 16px;
+        border: 0;
+        background: #0a84ff;
+        color: white;
+        box-shadow: 0 8px 35px rgba(10, 132, 255, 0.5);
+      }
+      .top {
+        position: fixed;
+        top: env(safe-area-inset-top);
+        left: 0;
+        right: 0;
+        display: flex;
+        justify-content: center;
+        padding: 10px;
+        pointer-events: none;
+      }
+      .top .panel {
+        pointer-events: auto;
+      }
+      label {
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <canvas id="gl"></canvas>
+      <video id="video" playsinline muted></video>
+
+      <div id="startOverlay" class="btn">
+        <button id="startBtn">Start Camera</button>
+      </div>
+
+      <div class="top">
+        <div class="panel">
+          <label
+            ><input type="checkbox" id="outlineToggle" checked /> Show
+            outline</label
+          >
+        </div>
+      </div>
+
+      <div class="hud">
+        <div class="row panel">
+          <label for="blurRange">Blur radius</label>
+          <input
+            id="blurRange"
+            class="range"
+            type="range"
+            min="0"
+            max="60"
+            step="1"
+            value="20"
+          />
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        // ----- DOM -----
+        const canvas = document.getElementById("gl");
+        const video = document.getElementById("video");
+        const startBtn = document.getElementById("startBtn");
+        const startOverlay = document.getElementById("startOverlay");
+        const blurRange = document.getElementById("blurRange");
+        const outlineToggle = document.getElementById("outlineToggle");
+
+        // ----- State -----
+        let gl, programs, buffers, textures, framebuffers;
+        let dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+        let canvasSize = { w: 0, h: 0 };
+
+        // Circle params (scale relative to short side, like the Swift code)
+        let innerScale = 0.2; // will clamp via pinch
+        let outerScale = 0.24;
+        const minInner = 0.02,
+          maxOuter = 0.95,
+          minGap = 0.01;
+        let showOutline = true;
+        let outlineThicknessPx = 2 * dpr; // approximates the SwiftUI thickness rule
+        let blurSigma = 20.0;
+
+        // Center in canvas pixels; initialize later after first resize
+        let centerPx = null;
+
+        // Pointer pinch handling
+        const pointers = new Map();
+        let pinchPrevDist = null;
+
+        // Video mapping (aspect fill) uniforms
+        const videoUV = { scale: [1, 1], offset: [0, 0] };
+
+        // ----- UI events -----
+        outlineToggle.addEventListener("change", () => {
+          showOutline = !!outlineToggle.checked;
+        });
+        blurRange.addEventListener("input", () => {
+          blurSigma = parseFloat(blurRange.value);
+        });
+
+        startBtn.addEventListener(
+          "click",
+          async () => {
+            try {
+              await startCamera();
+              initGL();
+              startOverlay.style.display = "none";
+              requestAnimationFrame(loop);
+            } catch (err) {
+              alert("Camera error: " + err.message);
+            }
+          },
+          { passive: true }
+        );
+
+        // ----- Camera -----
+        async function startCamera() {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1920 },
+              height: { ideal: 1080 },
+            },
+            audio: false,
+          });
+          video.srcObject = stream;
+          await video.play();
+        }
+
+        // ----- GL setup -----
+        function initGL() {
+          gl = canvas.getContext("webgl", {
+            antialias: false,
+            alpha: false,
+            preserveDrawingBuffer: false,
+          });
+          if (!gl) throw new Error("WebGL not available");
+
+          // Shaders
+          const vsQuad = `
+      attribute vec2 aPos;   // clip-space [-1,1]
+      attribute vec2 aUv;    // [0,1]
+      varying vec2 vUv;
+      void main(){
+        vUv = aUv;
+        gl_Position = vec4(aPos, 0.0, 1.0);
+      }
+    `;
+
+          const fsBlur = `
+      precision mediump float;
+      varying vec2 vUv;
+      uniform sampler2D uImage;
+      uniform vec2 uTexelSize;  // 1.0 / renderTargetSize in pixels
+      uniform vec2 uDirection;  // (1,0) or (0,1)
+      uniform float uSigma;     // blur radius in pixels (approx)
+
+      float gauss(float x, float s){ return exp(-0.5 * (x*x) / (s*s + 1e-6)); }
+
+      void main(){
+        if (uSigma < 0.5) {
+          gl_FragColor = texture2D(uImage, vUv);
+          return;
+        }
+        const int K = 10; // kernel radius (samples to each side)
+        vec4 acc = vec4(0.0);
+        float wsum = 0.0;
+        for (int i = -K; i <= K; i++){
+          float fi = float(i);
+          float w = gauss(fi, uSigma);
+          vec2 offset = fi * uDirection * uTexelSize;
+          acc += texture2D(uImage, vUv + offset) * w;
+          wsum += w;
+        }
+        gl_FragColor = acc / max(wsum, 1e-4);
+      }
+    `;
+
+          const fsComposite = `
+      precision mediump float;
+      varying vec2 vUv;
+      uniform sampler2D uVideo;     // original video (sampled with aspectFill mapping)
+      uniform sampler2D uBlurred;   // blurred scene in canvas coords
+      uniform vec2 uCanvasSize;     // pixels
+      uniform vec2 uCenterPx;       // pixels
+      uniform float uInnerRadius;   // px
+      uniform float uOuterRadius;   // px
+      uniform bool uShowOutline;
+      uniform float uOutlineThickness; // px
+      uniform vec2 uVideoUVScale;   // mapping to video uv
+      uniform vec2 uVideoUVOffset;  // mapping to video uv
+
+      // map canvas uv -> video uv with aspect fill
+      vec2 mapToVideo(vec2 uv){
+        return uVideoUVOffset + uv * uVideoUVScale;
+      }
+
+      void main(){
+        vec2 videoUV = mapToVideo(vUv);
+        vec4 baseCol = texture2D(uVideo, videoUV);
+        vec4 blurCol = texture2D(uBlurred, vUv);
+
+        // radial mask: 0 inside inner, 1 beyond outer, linear in between
+        vec2 fragPx = vUv * uCanvasSize;
+        float d = distance(fragPx, uCenterPx);
+        float t = clamp((d - uInnerRadius) / max(uOuterRadius - uInnerRadius, 1e-4), 0.0, 1.0);
+        vec4 color = mix(baseCol, blurCol, t);
+
+        if (uShowOutline){
+          float halfT = max(uOutlineThickness * 0.5, 1.0);
+          float ring = smoothstep(halfT + 0.5, 0.0, abs(d - uInnerRadius));
+          // Mix white ring over result
+          color = mix(color, vec4(1.0,1.0,1.0,1.0), ring);
+        }
+        gl_FragColor = color;
+      }
+    `;
+
+          // Programs
+          programs = {
+            blur: createProgram(vsQuad, fsBlur),
+            composite: createProgram(vsQuad, fsComposite),
+          };
+
+          // Quad geometry
+          const quad = new Float32Array([
+            //   x,   y,   u,  v
+            -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1,
+          ]);
+          buffers = { vao: gl.createBuffer() };
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffers.vao);
+          gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+
+          // Attributes setup function
+          function bindAttribs(program) {
+            const aPos = gl.getAttribLocation(program, "aPos");
+            const aUv = gl.getAttribLocation(program, "aUv");
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.vao);
+            gl.enableVertexAttribArray(aPos);
+            gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+            gl.enableVertexAttribArray(aUv);
+            gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
+          }
+          programs.blur.bindAttribs = () => bindAttribs(programs.blur);
+          programs.composite.bindAttribs = () =>
+            bindAttribs(programs.composite);
+
+          // Textures & FBOs
+          textures = {
+            video: createTexture(),
+            ping: createTexture(),
+            pong: createTexture(),
+          };
+          framebuffers = {
+            ping: gl.createFramebuffer(),
+            pong: gl.createFramebuffer(),
+          };
+
+          // Event listeners
+          window.addEventListener("resize", resize, { passive: true });
+          resize();
+
+          setupPointerEvents();
+        }
+
+        function createShader(type, src) {
+          const sh = gl.createShader(type);
+          gl.shaderSource(sh, src);
+          gl.compileShader(sh);
+          if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+            const log = gl.getShaderInfoLog(sh);
+            gl.deleteShader(sh);
+            throw new Error("Shader compile failed: " + log);
+          }
+          return sh;
+        }
+
+        function createProgram(vsSrc, fsSrc) {
+          const vs = createShader(gl.VERTEX_SHADER, vsSrc);
+          const fs = createShader(gl.FRAGMENT_SHADER, fsSrc);
+          const prog = gl.createProgram();
+          gl.attachShader(prog, vs);
+          gl.attachShader(prog, fs);
+          gl.linkProgram(prog);
+          if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            const log = gl.getProgramInfoLog(prog);
+            throw new Error("Program link failed: " + log);
+          }
+          return prog;
+        }
+
+        function createTexture() {
+          const tex = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.bindTexture(gl.TEXTURE_2D, null);
+          return tex;
+        }
+
+        function allocTexture(tex, w, h) {
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA,
+            w,
+            h,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            null
+          );
+        }
+
+        function bindFBO(fbo, tex) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+          gl.framebufferTexture2D(
+            gl.FRAMEBUFFER,
+            gl.COLOR_ATTACHMENT0,
+            gl.TEXTURE_2D,
+            tex,
+            0
+          );
+        }
+
+        function resize() {
+          const { clientWidth, clientHeight } = canvas;
+          const w = Math.max(1, Math.floor(window.innerWidth * dpr));
+          const h = Math.max(1, Math.floor(window.innerHeight * dpr));
+
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+            canvas.style.width = "100vw";
+            canvas.style.height = "100vh";
+            canvasSize = { w, h };
+
+            // Allocate FBO textures
+            allocTexture(textures.ping, w, h);
+            allocTexture(textures.pong, w, h);
+
+            // Recompute mapping from canvas UV to video UV (aspect fill)
+            updateVideoUVMapping();
+
+            // Initialize center to middle on first run
+            if (!centerPx) centerPx = { x: w * 0.5, y: h * 0.5 };
+          }
+          gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        function updateVideoUVMapping() {
+          const vw = video.videoWidth || 1280,
+            vh = video.videoHeight || 720;
+          const cw = canvas.width,
+            ch = canvas.height;
+          const scale = Math.max(cw / vw, ch / vh); // aspect fill
+          const visW = cw / (vw * scale);
+          const visH = ch / (vh * scale);
+          videoUV.scale = [visW, visH];
+          videoUV.offset = [(1 - visW) * 0.5, (1 - visH) * 0.5];
+        }
+
+        // ----- Pointer / gesture handling -----
+        function setupPointerEvents() {
+          canvas.addEventListener("pointerdown", (e) => {
+            canvas.setPointerCapture(e.pointerId);
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (pointers.size === 1) {
+              // set center
+              const rect = canvas.getBoundingClientRect();
+              const x = (e.clientX - rect.left) * dpr;
+              const y = (e.clientY - rect.top) * dpr;
+              // convert to GL pixel coords (origin top-left -> we keep same as CSS, but our shader uses vUv from (0,0) top-left)
+              centerPx = { x, y };
+            } else if (pointers.size === 2) {
+              pinchPrevDist = pinchDistance();
+            }
+          });
+
+          canvas.addEventListener("pointermove", (e) => {
+            if (!pointers.has(e.pointerId)) return;
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+            if (pointers.size === 1) {
+              const rect = canvas.getBoundingClientRect();
+              const x = (e.clientX - rect.left) * dpr;
+              const y = (e.clientY - rect.top) * dpr;
+              // clamp within canvas
+              centerPx.x = Math.max(0, Math.min(canvas.width, x));
+              centerPx.y = Math.max(0, Math.min(canvas.height, y));
+            } else if (pointers.size === 2) {
+              const dist = pinchDistance();
+              if (pinchPrevDist) {
+                const factor = dist / pinchPrevDist;
+                let newInner = innerScale * factor;
+                let newOuter = outerScale * factor;
+                newInner = Math.max(
+                  minInner,
+                  Math.min(newInner, maxOuter - minGap)
+                );
+                newOuter = Math.max(
+                  newInner + minGap,
+                  Math.min(newOuter, maxOuter)
+                );
+                innerScale = newInner;
+                outerScale = newOuter;
+              }
+              pinchPrevDist = dist;
+            }
+          });
+
+          function pinchDistance() {
+            const it = Array.from(pointers.values());
+            const dx = it[0].x - it[1].x;
+            const dy = it[0].y - it[1].y;
+            return Math.hypot(dx, dy);
+          }
+
+          function endPointer(e) {
+            pointers.delete(e.pointerId);
+            if (pointers.size < 2) pinchPrevDist = null;
+          }
+          canvas.addEventListener("pointerup", endPointer);
+          canvas.addEventListener("pointercancel", endPointer);
+          canvas.addEventListener("pointerout", endPointer);
+          canvas.addEventListener("pointerleave", endPointer);
+        }
+
+        // ----- Render loop -----
+        function loop() {
+          // Keep sizes fresh
+          if (video.readyState >= 2) {
+            updateVideoUVMapping();
+            uploadVideoTexture();
+          }
+
+          render();
+          requestAnimationFrame(loop);
+        }
+
+        function uploadVideoTexture() {
+          gl.bindTexture(gl.TEXTURE_2D, textures.video);
+          try {
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              video
+            );
+          } catch (e) {
+            // Some Safari versions need an initial allocation; fall back silently.
+            const vw = video.videoWidth || 1280,
+              vh = video.videoHeight || 720;
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              vw,
+              vh,
+              0,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              null
+            );
+          }
+        }
+
+        function render() {
+          const w = canvas.width,
+            h = canvas.height;
+
+          // 1) Horizontal blur pass: video -> ping
+          gl.useProgram(programs.blur);
+          programs.blur.bindAttribs();
+          bindFBO(framebuffers.ping, textures.ping);
+          gl.viewport(0, 0, w, h);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          // uniforms
+          setSampler(programs.blur, "uImage", textures.video, 0);
+          set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
+          set2(programs.blur, "uDirection", [1, 0]);
+          set1(programs.blur, "uSigma", blurSigma);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+          // 2) Vertical blur pass: ping -> pong
+          gl.useProgram(programs.blur);
+          programs.blur.bindAttribs();
+          bindFBO(framebuffers.pong, textures.pong);
+          gl.viewport(0, 0, w, h);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          setSampler(programs.blur, "uImage", textures.ping, 0);
+          set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
+          set2(programs.blur, "uDirection", [0, 1]);
+          set1(programs.blur, "uSigma", blurSigma);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+          // 3) Composite to screen: mix original (video) with blurred (pong) using radial mask; draw outline
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.viewport(0, 0, w, h);
+          gl.useProgram(programs.composite);
+          programs.composite.bindAttribs();
+
+          // Compute radii in pixels from scales
+          const shortSide = Math.min(w, h);
+          const innerR = shortSide * innerScale;
+          const outerR = shortSide * outerScale;
+
+          setSampler(programs.composite, "uVideo", textures.video, 0);
+          setSampler(programs.composite, "uBlurred", textures.pong, 1);
+          set2(programs.composite, "uCanvasSize", [w, h]);
+          const cx = centerPx ? centerPx.x : w * 0.5;
+          const cy = centerPx ? centerPx.y : h * 0.5;
+          set2(programs.composite, "uCenterPx", [cx, cy]);
+          set1(programs.composite, "uInnerRadius", innerR);
+          set1(programs.composite, "uOuterRadius", outerR);
+          set1(programs.composite, "uOutlineThickness", outlineThicknessPx);
+          setBool(programs.composite, "uShowOutline", !!showOutline);
+          set2(programs.composite, "uVideoUVScale", videoUV.scale);
+          set2(programs.composite, "uVideoUVOffset", videoUV.offset);
+
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+
+        // ----- Uniform helpers -----
+        function loc(p, name) {
+          return gl.getUniformLocation(p, name);
+        }
+        function set1(p, name, x) {
+          gl.uniform1f(loc(p, name), x);
+        }
+        function set2(p, name, v) {
+          gl.uniform2f(loc(p, name), v[0], v[1]);
+        }
+        function setBool(p, name, b) {
+          gl.uniform1i(loc(p, name), b ? 1 : 0);
+        }
+        function setSampler(p, name, tex, unit) {
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.uniform1i(loc(p, name), unit);
+        }
+      })();
+    </script>
+  </body>
+</html>
