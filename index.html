@@ -456,8 +456,8 @@
               // set center
               const rect = canvas.getBoundingClientRect();
               const x = (e.clientX - rect.left) * dpr;
-              const y = (e.clientY - rect.top) * dpr;
-              // convert to GL pixel coords (origin top-left -> we keep same as CSS, but our shader uses vUv from (0,0) top-left)
+              const yCss = (e.clientY - rect.top) * dpr;
+              const y = canvas.height - yCss; // flip Y so up is up
               centerPx = { x, y };
             } else if (pointers.size === 2) {
               pinchPrevDist = pinchDistance();
@@ -471,7 +471,8 @@
             if (pointers.size === 1) {
               const rect = canvas.getBoundingClientRect();
               const x = (e.clientX - rect.left) * dpr;
-              const y = (e.clientY - rect.top) * dpr;
+              const yCss = (e.clientY - rect.top) * dpr;
+              const y = canvas.height - yCss; // flip Y so up is up
               // clamp within canvas
               centerPx.x = Math.max(0, Math.min(canvas.width, x));
               centerPx.y = Math.max(0, Math.min(canvas.height, y));
