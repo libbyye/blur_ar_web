@@ -285,7 +285,8 @@
         vec4 blurCol = texture2D(uBlurred, vUv);
 
         // radial mask: 0 inside inner, 1 beyond outer, linear in between
-        vec2 fragPx = vUv * uCanvasSize;
+        vec2 fragPx = vec2(vUv.x, 1.0 - vUv.y) * uCanvasSize; // flip Y so touch up = circle up
+
         float d = distance(fragPx, uCenterPx);
         float t = clamp((d - uInnerRadius) / max(uOuterRadius - uInnerRadius, 1e-4), 0.0, 1.0);
         vec4 color = mix(baseCol, blurCol, t);
@@ -456,8 +457,8 @@
               // set center
               const rect = canvas.getBoundingClientRect();
               const x = (e.clientX - rect.left) * dpr;
-              const yCss = (e.clientY - rect.top) * dpr;
-              const y = canvas.height - yCss; // flip Y so up is up
+              const y = (e.clientY - rect.top) * dpr;
+              // convert to GL pixel coords (origin top-left -> we keep same as CSS, but our shader uses vUv from (0,0) top-left)
               centerPx = { x, y };
             } else if (pointers.size === 2) {
               pinchPrevDist = pinchDistance();
@@ -471,8 +472,7 @@
             if (pointers.size === 1) {
               const rect = canvas.getBoundingClientRect();
               const x = (e.clientX - rect.left) * dpr;
-              const yCss = (e.clientY - rect.top) * dpr;
-              const y = canvas.height - yCss; // flip Y so up is up
+              const y = (e.clientY - rect.top) * dpr;
               // clamp within canvas
               centerPx.x = Math.max(0, Math.min(canvas.width, x));
               centerPx.y = Math.max(0, Math.min(canvas.height, y));
