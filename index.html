@@ -1,3 +1,7 @@
+ok so is it possible to integrate that with the code below? be specific about
+where to put what: dont hallucinate. why is the camera view seem horizontally
+sqashed but the radial center clearness is normal? pls fix if possible. for the
+fix, be very specific about where to put what:
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -303,38 +307,42 @@
       }
     `;
 
-          const fsCopy = `
-precision mediump float;
-varying vec2 vUv;
-uniform sampler2D uVideo;
-uniform vec2 uVideoUVScale;
-uniform vec2 uVideoUVOffset;
-
-void main(){
-  vec2 uv = uVideoUVOffset + vUv * uVideoUVScale; // aspect-fill mapping
-  gl_FragColor = texture2D(uVideo, uv);
-}
-`;
-
+          // Programs
           programs = {
             blur: createProgram(vsQuad, fsBlur),
             composite: createProgram(vsQuad, fsComposite),
-            copy: createProgram(vsQuad, fsCopy), // NEW
           };
+
+          // Quad geometry
+          const quad = new Float32Array([
+            //   x,   y,   u,  v
+            -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, 1, 1, 1, 1,
+          ]);
+          buffers = { vao: gl.createBuffer() };
+          gl.bindBuffer(gl.ARRAY_BUFFER, buffers.vao);
+          gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+
+          // Attributes setup function
+          function bindAttribs(program) {
+            const aPos = gl.getAttribLocation(program, "aPos");
+            const aUv = gl.getAttribLocation(program, "aUv");
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.vao);
+            gl.enableVertexAttribArray(aPos);
+            gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+            gl.enableVertexAttribArray(aUv);
+            gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
+          }
           programs.blur.bindAttribs = () => bindAttribs(programs.blur);
           programs.composite.bindAttribs = () =>
             bindAttribs(programs.composite);
-          programs.copy.bindAttribs = () => bindAttribs(programs.copy); // NEW
 
           // Textures & FBOs
           textures = {
             video: createTexture(),
-            src: createTexture(), // NEW
             ping: createTexture(),
             pong: createTexture(),
           };
           framebuffers = {
-            src: gl.createFramebuffer(), // NEW
             ping: gl.createFramebuffer(),
             pong: gl.createFramebuffer(),
           };
@@ -424,8 +432,6 @@ void main(){
             // Allocate FBO textures
             allocTexture(textures.ping, w, h);
             allocTexture(textures.pong, w, h);
-
-            allocTexture(textures.src, w, h); // NEW
 
             // Recompute mapping from canvas UV to video UV (aspect fill)
             updateVideoUVMapping();
@@ -559,17 +565,6 @@ void main(){
           const w = canvas.width,
             h = canvas.height;
 
-          // 0) Copy video -> src with aspect-fill mapping
-          gl.useProgram(programs.copy);
-          programs.copy.bindAttribs();
-          bindFBO(framebuffers.src, textures.src);
-          gl.viewport(0, 0, w, h);
-          gl.clear(gl.COLOR_BUFFER_BIT);
-          setSampler(programs.copy, "uVideo", textures.video, 0);
-          set2(programs.copy, "uVideoUVScale", videoUV.scale);
-          set2(programs.copy, "uVideoUVOffset", videoUV.offset);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
           // 1) Horizontal blur pass: video -> ping
           gl.useProgram(programs.blur);
           programs.blur.bindAttribs();
@@ -577,8 +572,7 @@ void main(){
           gl.viewport(0, 0, w, h);
           gl.clear(gl.COLOR_BUFFER_BIT);
           // uniforms
-          setSampler(programs.blur, "uImage", textures.src, 0);
-
+          setSampler(programs.blur, "uImage", textures.video, 0);
           set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
           set2(programs.blur, "uDirection", [1, 0]);
           set1(programs.blur, "uSigma", blurSigma);
@@ -607,8 +601,7 @@ void main(){
           const innerR = shortSide * innerScale;
           const outerR = shortSide * outerScale;
 
-          setSampler(programs.composite, "uVideo", textures.src, 0);
-
+          setSampler(programs.composite, "uVideo", textures.video, 0);
           setSampler(programs.composite, "uBlurred", textures.pong, 1);
           set2(programs.composite, "uCanvasSize", [w, h]);
           const cx = centerPx ? centerPx.x : w * 0.5;
@@ -618,8 +611,8 @@ void main(){
           set1(programs.composite, "uOuterRadius", outerR);
           set1(programs.composite, "uOutlineThickness", outlineThicknessPx);
           setBool(programs.composite, "uShowOutline", !!showOutline);
-          set2(programs.composite, "uVideoUVScale", [1, 1]);
-          set2(programs.composite, "uVideoUVOffset", [0, 0]);
+          set2(programs.composite, "uVideoUVScale", videoUV.scale);
+          set2(programs.composite, "uVideoUVOffset", videoUV.offset);
 
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
