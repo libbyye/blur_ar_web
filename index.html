@@ -303,10 +303,27 @@
       }
     `;
 
+          const fsCopy = `
+precision mediump float;
+varying vec2 vUv;
+uniform sampler2D uVideo;
+uniform vec2 uVideoUVScale;
+uniform vec2 uVideoUVOffset;
+
+vec2 mapToVideo(vec2 uv){
+  return uVideoUVOffset + uv * uVideoUVScale;
+}
+
+void main(){
+  gl_FragColor = texture2D(uVideo, mapToVideo(vUv));
+}
+`;
+
           // Programs
           programs = {
             blur: createProgram(vsQuad, fsBlur),
             composite: createProgram(vsQuad, fsComposite),
+            copy: createProgram(vsQuad, fsCopy),
           };
 
           // Quad geometry
@@ -331,6 +348,7 @@
           programs.blur.bindAttribs = () => bindAttribs(programs.blur);
           programs.composite.bindAttribs = () =>
             bindAttribs(programs.composite);
+          programs.copy.bindAttribs = () => bindAttribs(programs.copy);
 
           // Textures & FBOs
           textures = {
@@ -561,44 +579,53 @@
           const w = canvas.width,
             h = canvas.height;
 
-          // 1) Horizontal blur pass: video -> ping
-          gl.useProgram(programs.blur);
-          programs.blur.bindAttribs();
+          // 0) Copy with aspect-fill: uVideo -> ping
+          gl.useProgram(programs.copy);
+          programs.copy.bindAttribs();
           bindFBO(framebuffers.ping, textures.ping);
           gl.viewport(0, 0, w, h);
           gl.clear(gl.COLOR_BUFFER_BIT);
-          // uniforms
-          setSampler(programs.blur, "uImage", textures.video, 0);
-          set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
-          set2(programs.blur, "uDirection", [1, 0]);
-          set1(programs.blur, "uSigma", blurSigma);
+          setSampler(programs.copy, "uVideo", textures.video, 0);
+          set2(programs.copy, "uVideoUVScale", videoUV.scale);
+          set2(programs.copy, "uVideoUVOffset", videoUV.offset);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-          // 2) Vertical blur pass: ping -> pong
+          // 1) Horizontal blur: ping -> pong
           gl.useProgram(programs.blur);
           programs.blur.bindAttribs();
           bindFBO(framebuffers.pong, textures.pong);
           gl.viewport(0, 0, w, h);
           gl.clear(gl.COLOR_BUFFER_BIT);
-          setSampler(programs.blur, "uImage", textures.ping, 0);
+          setSampler(programs.blur, "uImage", textures.ping, 0); // NOTE: ping, not raw video
+          set2(programs.blur, "uTexelSize", [1 / w, 1 / h]); // texel size matches FBO
+          set2(programs.blur, "uDirection", [1, 0]);
+          set1(programs.blur, "uSigma", blurSigma);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+          // 2) Vertical blur: pong -> ping
+          gl.useProgram(programs.blur);
+          programs.blur.bindAttribs();
+          bindFBO(framebuffers.ping, textures.ping);
+          gl.viewport(0, 0, w, h);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          setSampler(programs.blur, "uImage", textures.pong, 0);
           set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
           set2(programs.blur, "uDirection", [0, 1]);
           set1(programs.blur, "uSigma", blurSigma);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-          // 3) Composite to screen: mix original (video) with blurred (pong) using radial mask; draw outline
+          // 3) Composite to screen (unchanged except: use ping as the final blurred tex)
           gl.bindFramebuffer(gl.FRAMEBUFFER, null);
           gl.viewport(0, 0, w, h);
           gl.useProgram(programs.composite);
           programs.composite.bindAttribs();
 
-          // Compute radii in pixels from scales
           const shortSide = Math.min(w, h);
           const innerR = shortSide * innerScale;
           const outerR = shortSide * outerScale;
 
           setSampler(programs.composite, "uVideo", textures.video, 0);
-          setSampler(programs.composite, "uBlurred", textures.pong, 1);
+          setSampler(programs.composite, "uBlurred", textures.ping, 1); // <-- use ping here
           set2(programs.composite, "uCanvasSize", [w, h]);
           const cx = centerPx ? centerPx.x : w * 0.5;
           const cy = centerPx ? centerPx.y : h * 0.5;
