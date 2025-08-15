@@ -284,7 +284,8 @@
       void main(){
         vec2 videoUV = mapToVideo(vUv);
         vec4 baseCol = texture2D(uVideo, videoUV);
-        vec4 blurCol = texture2D(uBlurred, vUv);
+        vec4 blurCol = texture2D(uBlurred, mapToVideo(vUv));
+
 
         // radial mask: 0 inside inner, 1 beyond outer, linear in between
         vec2 fragPx = vec2(vUv.x, 1.0 - vUv.y) * uCanvasSize; // flip Y so touch up = circle up
