@@ -220,6 +220,8 @@
           });
           if (!gl) throw new Error("WebGL not available");
 
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
           // Shaders
           const vsQuad = `
       attribute vec2 aPos;   // clip-space [-1,1]
