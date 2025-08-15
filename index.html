@@ -234,44 +234,33 @@
     `;
 
           const fsBlur = `
-precision mediump float;
-varying vec2 vUv;
-uniform sampler2D uImage;
-uniform vec2 uTexelSize;   // 1.0 / canvas size (px)
-uniform vec2 uDirection;   // (1,0) or (0,1)
-uniform float uSigma;      // blur radius (px)
+      precision mediump float;
+      varying vec2 vUv;
+      uniform sampler2D uImage;
+      uniform vec2 uTexelSize;  // 1.0 / renderTargetSize in pixels
+      uniform vec2 uDirection;  // (1,0) or (0,1)
+      uniform float uSigma;     // blur radius in pixels (approx)
 
-// NEW: map canvas uv -> source texture uv (aspect fill for first pass; identity for second)
-uniform vec2 uVideoUVScale;
-uniform vec2 uVideoUVOffset;
+      float gauss(float x, float s){ return exp(-0.5 * (x*x) / (s*s + 1e-6)); }
 
-float gauss(float x, float s){ return exp(-0.5 * (x*x) / (s*s + 1e-6)); }
-
-void main(){
-  // Base uv in source texture (video or already-mapped FBO)
-  vec2 uv0 = uVideoUVOffset + vUv * uVideoUVScale;
-
-  if (uSigma < 0.5) {
-    gl_FragColor = texture2D(uImage, uv0);
-    return;
-  }
-
-  const int K = 10;
-  vec4 acc = vec4(0.0);
-  float wsum = 0.0;
-
-  // Convert canvas-pixel offsets to source-texture uv using the same mapping
-  vec2 delta = uDirection * uTexelSize * uVideoUVScale;
-
-  for (int i = -K; i <= K; i++){
-    float fi = float(i);
-    float w = gauss(fi, uSigma);
-    acc += texture2D(uImage, uv0 + fi * delta) * w;
-    wsum += w;
-  }
-  gl.FragColor = acc / max(wsum, 1e-4);
-}
-`;
+      void main(){
+        if (uSigma < 0.5) {
+          gl_FragColor = texture2D(uImage, vUv);
+          return;
+        }
+        const int K = 10; // kernel radius (samples to each side)
+        vec4 acc = vec4(0.0);
+        float wsum = 0.0;
+        for (int i = -K; i <= K; i++){
+          float fi = float(i);
+          float w = gauss(fi, uSigma);
+          vec2 offset = fi * uDirection * uTexelSize;
+          acc += texture2D(uImage, vUv + offset) * w;
+          wsum += w;
+        }
+        gl_FragColor = acc / max(wsum, 1e-4);
+      }
+    `;
 
           const fsComposite = `
       precision mediump float;
@@ -578,14 +567,11 @@ void main(){
           bindFBO(framebuffers.ping, textures.ping);
           gl.viewport(0, 0, w, h);
           gl.clear(gl.COLOR_BUFFER_BIT);
+          // uniforms
           setSampler(programs.blur, "uImage", textures.video, 0);
           set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
           set2(programs.blur, "uDirection", [1, 0]);
           set1(programs.blur, "uSigma", blurSigma);
-          // NEW:
-          set2(programs.blur, "uVideoUVScale", videoUV.scale);
-          set2(programs.blur, "uVideoUVOffset", videoUV.offset);
-
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
           // 2) Vertical blur pass: ping -> pong
@@ -598,10 +584,6 @@ void main(){
           set2(programs.blur, "uTexelSize", [1 / w, 1 / h]);
           set2(programs.blur, "uDirection", [0, 1]);
           set1(programs.blur, "uSigma", blurSigma);
-          // NEW: identity mapping
-          set2(programs.blur, "uVideoUVScale", [1, 1]);
-          set2(programs.blur, "uVideoUVOffset", [0, 0]);
-
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
           // 3) Composite to screen: mix original (video) with blurred (pong) using radial mask; draw outline
